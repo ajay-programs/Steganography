@@ -1,0 +1,335 @@
+// sky
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Steganography (Browser) — Hide Text in Images</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { --bg: #f4f7fb; --card: #ffffff; --accent: #2b7cff; --muted: #6b7280; --danger: #e74c3c; }
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: var(--bg); color: #111827; }
+    header { background: linear-gradient(90deg,#0f172a,#0b1220); color: white; padding: 18px 20px; }
+    header h1 { margin: 0; font-size: 20px; letter-spacing: -0.2px; }
+    main { max-width: 980px; margin: 20px auto; padding: 0 16px; }
+    .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; }
+    .card { background: var(--card); border-radius: 12px; padding: 14px; box-shadow: 0 6px 20px rgba(13,16,30,0.06); }
+    label { display:block; font-size: 13px; color: #0f172a; margin-bottom: 6px; }
+    input[type=file], textarea, input[type=text], button { width:100%; font-size:14px; padding:10px; border-radius:8px; border:1px solid #e6e9ef; background: #fff; }
+    textarea { min-height:120px; resize:vertical; }
+    .row { display:flex; gap:8px; align-items:center; }
+    .small { font-size:12px; color:var(--muted); }
+    .muted { color:var(--muted); }
+    .actions { display:flex; gap:8px; margin-top:10px; }
+    button.primary { background: var(--accent); color:white; border:none; cursor:pointer; }
+    button.ghost { background:transparent; border:1px solid #d1d5db; cursor:pointer; }
+    canvas { width:100%; border-radius: 8px; display:block; background:#fff; }
+    .capacity { font-weight:600; color:#0b1220; }
+    .danger { color: var(--danger); font-weight:600; }
+    footer { margin:20px auto; text-align:center; color:var(--muted); font-size:13px; }
+    @media (max-width:880px){ .grid{ grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🔐 Steganography — Hide Text Inside Images (Browser)</h1>
+  </header>
+
+  <main>
+    <div class="grid">
+      <!-- Left column: controls -->
+      <div class="card">
+        <label>1) Choose an image (PNG/JPEG)</label>
+        <input id="fileInput" type="file" accept="image/*">
+
+        <div style="height:10px"></div>
+
+        <label>2) Enter secret text to hide</label>
+        <textarea id="secretText" placeholder="Type secret message here..."></textarea>
+
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button id="embedBtn" class="primary">Embed (Hide Text)</button>
+          <button id="clearBtn" class="ghost">Clear</button>
+        </div>
+
+        <div style="height:12px"></div>
+
+        <label>3) Or extract hidden text from an image</label>
+        <div class="actions">
+          <button id="extractBtn" class="primary">Extract from Loaded Image</button>
+          <button id="downloadBtn" class="ghost" disabled>Download Stego Image</button>
+        </div>
+
+        <div style="height:12px"></div>
+        <div class="small muted">
+          <div>Capacity: <span id="capacityInfo">—</span></div>
+          <div id="warning" style="margin-top:6px; display:none;" class="danger">Message too large for this image!</div>
+          <div style="margin-top:8px;">Note: This demo uses <strong>LSB (least-significant bit)</strong> encoding on RGB channels (not alpha). It's client-side only.</div>
+        </div>
+      </div>
+
+      <!-- Right column: preview & result -->
+      <div class="card">
+        <label>Image preview</label>
+        <canvas id="canvas" width="640" height="360"></canvas>
+
+        <div style="height:10px"></div>
+        <div class="row" style="justify-content:space-between;">
+          <div class="small muted">Image size: <span id="imgSize">—</span></div>
+          <div class="small muted">Pixels: <span id="pixelCount">—</span></div>
+        </div>
+
+        <div style="height:12px"></div>
+        <label>Extracted secret text</label>
+        <textarea id="extracted" readonly placeholder="Extracted text will appear here..."></textarea>
+      </div>
+    </div>
+
+    <div style="height:10px;"></div>
+    <div class="card small muted">
+      <strong>How it works (short):</strong>
+      <div style="margin-top:6px;">
+        The app converts the secret text to bytes, stores its length (32-bit) followed by the message bits, and writes one bit into each color channel's least-significant bit (R,G,B) for each pixel. That provides ~3 bits per pixel capacity.
+      </div>
+      <div style="margin-top:8px;">
+        Limitations: This is a demo. LSB can be fragile (image recompression may ruin hidden text). For robust steganography use advanced transforms and consider encryption.
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    Built with HTML / CSS / JavaScript — client-side only · Demo for learning
+  </footer>
+
+<script>
+(() => {
+  const fileInput = document.getElementById('fileInput');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const secretText = document.getElementById('secretText');
+  const embedBtn = document.getElementById('embedBtn');
+  const extractBtn = document.getElementById('extractBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const extracted = document.getElementById('extracted');
+  const capacityInfo = document.getElementById('capacityInfo');
+  const imgSize = document.getElementById('imgSize');
+  const pixelCount = document.getElementById('pixelCount');
+  const warning = document.getElementById('warning');
+  const clearBtn = document.getElementById('clearBtn');
+
+  let originalImage = null;
+  let lastStegoDataUrl = null;
+
+  // Helpers
+  function bytesFromText(str) {
+    return new TextEncoder().encode(str); // Uint8Array
+  }
+  function textFromBytes(bytes) {
+    return new TextDecoder().decode(bytes);
+  }
+
+  function updateMetaInfo(w,h) {
+    imgSize.textContent = `${w} × ${h}`;
+    pixelCount.textContent = `${w*h}`;
+    const capacityBits = w * h * 3; // using R,G,B channels => 3 bits per pixel
+    const capacityBytes = Math.floor((capacityBits - 32) / 8); // minus 32 bits for length
+    capacityInfo.textContent = `${capacityBytes} bytes (~${capacityBits} bits total, minus 32-bit header)`;
+  }
+
+  function showWarning(show) {
+    warning.style.display = show ? 'block' : 'none';
+  }
+
+  function loadImageToCanvas(img) {
+    // fit image into canvas but preserve resolution for capacity calculations
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    updateMetaInfo(canvas.width, canvas.height);
+  }
+
+  fileInput.addEventListener('change', (ev) => {
+    const file = ev.target.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      originalImage = img;
+      loadImageToCanvas(img);
+      extracted.value = '';
+      lastStegoDataUrl = null;
+      downloadBtn.disabled = true;
+      showWarning(false);
+    };
+    img.onerror = () => alert('Failed to load image.');
+    img.src = URL.createObjectURL(file);
+  });
+
+  clearBtn.addEventListener('click', () => {
+    secretText.value = '';
+    extracted.value = '';
+    showWarning(false);
+  });
+
+  // Core LSB encoding/decoding
+  function getImageData() {
+    return ctx.getImageData(0,0,canvas.width,canvas.height);
+  }
+
+  // Set LSB of a channel value to bit (0 or 1)
+  function setLSB(value, bit) {
+    // clear LSB then add bit
+    return (value & ~1) | (bit & 1);
+  }
+
+  function embedMessageIntoImageData(imageData, messageBytes) {
+    const w = imageData.width;
+    const h = imageData.height;
+    const data = imageData.data; // Uint8ClampedArray [r,g,b,a, r,g,b,a,...]
+    const capacityBits = w * h * 3;
+    const neededBits = 32 + messageBytes.length * 8; // 32-bit length prefix
+    if (neededBits > capacityBits) return false;
+
+    // create a bit stream: first 32 bits is message length in bytes (big-endian)
+    const length = messageBytes.length >>> 0;
+    const bits = [];
+    // 32-bit length (big-endian)
+    for (let i = 31; i >= 0; i--) bits.push((length >> i) & 1);
+    // message bytes
+    for (let b = 0; b < messageBytes.length; b++) {
+      for (let i = 7; i >= 0; i--) bits.push((messageBytes[b] >> i) & 1);
+    }
+
+    let bitIndex = 0;
+    // iterate pixels
+    for (let p = 0; p < w*h; p++) {
+      const base = p * 4;
+      // R
+      if (bitIndex < bits.length) { data[base] = setLSB(data[base], bits[bitIndex++]); } else break;
+      // G
+      if (bitIndex < bits.length) { data[base+1] = setLSB(data[base+1], bits[bitIndex++]); } else break;
+      // B
+      if (bitIndex < bits.length) { data[base+2] = setLSB(data[base+2], bits[bitIndex++]); } else break;
+      // leave alpha unchanged
+    }
+    // write back
+    ctx.putImageData(imageData, 0, 0);
+    return true;
+  }
+
+  function extractMessageFromImageData(imageData) {
+    const w = imageData.width;
+    const h = imageData.height;
+    const data = imageData.data;
+    const capacityBits = w * h * 3;
+
+    // read first 32 bits => length
+    const bits = [];
+    let bitIndex = 0;
+    for (let p = 0; p < w*h; p++) {
+      const base = p*4;
+      // R
+      bits.push(data[base] & 1); bitIndex++;
+      // G
+      bits.push(data[base+1] & 1); bitIndex++;
+      // B
+      bits.push(data[base+2] & 1); bitIndex++;
+      if (bitIndex >= 32) break;
+    }
+    if (bits.length < 32) return { error: 'Image too small or no hidden data.' };
+
+    // reconstruct 32-bit length (big-endian)
+    let length = 0;
+    for (let i = 0; i < 32; i++) {
+      length = (length << 1) | bits[i];
+    }
+    if (length === 0) return { text: '' };
+
+    const totalMessageBits = length * 8;
+    if (32 + totalMessageBits > capacityBits) return { error: 'Declared length exceeds capacity — likely no hidden data or corrupt.' };
+
+    // collect message bits
+    const msgBits = [];
+    bitIndex = 0;
+    let bitsToSkip = 32; // we've already consumed first 32 bits
+    for (let p = 0; p < w*h; p++) {
+      const base = p*4;
+      const channelBits = [data[base] & 1, data[base+1] & 1, data[base+2] & 1];
+      for (let c = 0; c < 3; c++) {
+        if (bitsToSkip > 0) { bitsToSkip--; continue; } // skip the header bits
+        if (msgBits.length < totalMessageBits) {
+          msgBits.push(channelBits[c]);
+        } else break;
+      }
+      if (msgBits.length >= totalMessageBits) break;
+    }
+
+    if (msgBits.length < totalMessageBits) return { error: 'Not enough bits to reconstruct message.' };
+
+    // convert bits to bytes
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
+      let b = 0;
+      for (let j = 0; j < 8; j++) {
+        b = (b << 1) | msgBits[i*8 + j];
+      }
+      bytes[i] = b;
+    }
+    return { text: textFromBytes(bytes) };
+  }
+
+  // Button handlers
+  embedBtn.addEventListener('click', () => {
+    if (!canvas.width || !canvas.height) { alert('Load an image first.'); return; }
+    const msg = secretText.value || '';
+    const msgBytes = bytesFromText(msg);
+    const imageData = getImageData();
+    const success = embedMessageIntoImageData(imageData, msgBytes);
+    if (!success) {
+      showWarning(true);
+      alert('Message too large for this image. Consider using a larger image or shorten the message.');
+      return;
+    }
+    showWarning(false);
+    // update stego data url
+    lastStegoDataUrl = canvas.toDataURL('image/png');
+    downloadBtn.disabled = false;
+    alert('Message embedded! Use "Download Stego Image" to save.');
+  });
+
+  extractBtn.addEventListener('click', () => {
+    if (!canvas.width || !canvas.height) { alert('Load an image first.'); return; }
+    const imageData = getImageData();
+    const result = extractMessageFromImageData(imageData);
+    if (result.error) {
+      extracted.value = '';
+      alert(result.error);
+    } else {
+      extracted.value = result.text;
+      if (result.text === '') alert('No message found (or message is empty).');
+      else alert('Message extracted successfully!');
+    }
+  });
+
+  downloadBtn.addEventListener('click', () => {
+    if (!lastStegoDataUrl) { alert('No stego image available. Embed a message first.'); return; }
+    const a = document.createElement('a');
+    a.href = lastStegoDataUrl;
+    a.download = 'stego-image.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+  // initial: blank canvas
+  function initBlank() {
+    canvas.width = 640; canvas.height = 360;
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = '#222'; ctx.font = '16px Inter, Arial'; ctx.fillText('No image loaded', 12, 30);
+    updateMetaInfo(canvas.width, canvas.height);
+  }
+  initBlank();
+
+})();
+</script>
+</body>
+</html>
